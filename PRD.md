@@ -31,7 +31,8 @@
 
 - Ursina/Panda3D 기반 렌더링
 - 검정 배경 + 스타필드(우주 배경)
-- 우주인 모델 로드 우선순위:
+- 모델 로드 우선순위:
+  - `Hubble Space Telescope (B).glb`
   - `Astronaut_plain.obj`
   - `Astronaut_compat.glb`
   - `Astronaut_plain.glb`

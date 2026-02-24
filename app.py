@@ -17,9 +17,9 @@ import numpy as np
 from panda3d.core import SamplerState
 from panda3d.core import Shader
 from panda3d.core import Texture as PandaTexture
+from panda3d.core import CullFaceAttrib
+from panda3d.core import TransparencyAttrib
 from ursina import (
-    AmbientLight,
-    DirectionalLight,
     Entity,
     Text,
     Texture,
@@ -76,6 +76,11 @@ HAND_LANDMARKER_TASK_URL = (
 
 
 _LEGACY_TEXTURE_SHADER: Optional[Shader] = None
+HUBBLE_VISUAL_ALPHA = 0.68
+HUBBLE_VISUAL_TINT = (0.74, 0.86, 1.0)
+HUBBLE_GLOW_COLOR = (0.32, 0.64, 1.0)
+HUBBLE_GLOW_ALPHA = 0.34
+HUBBLE_GLOW_SCALE = 1.06
 
 
 def get_legacy_texture_shader() -> Shader:
@@ -278,7 +283,14 @@ class HandTracker:
         if self.hands is not None:
             self.hands.close()
         if self.hand_landmarker is not None:
-            self.hand_landmarker.close()
+            try:
+                self.hand_landmarker.close()
+            except RuntimeError as exc:
+                # Interpreter shutdown can race with MediaPipe background dispatcher.
+                if "cannot schedule new futures after shutdown" not in str(exc):
+                    raise
+            except Exception:
+                pass
         self.cap.release()
 
 
@@ -326,12 +338,14 @@ class WebcamPanel(Entity):
 class AstronautGestureController:
     def __init__(self, astronaut: Entity) -> None:
         self.astronaut = astronaut
+        is_hubble = bool(getattr(astronaut, "is_hubble_model", False))
+        self.is_hubble = is_hubble
 
         self.target_position = Vec3(0.0, 0.0, 0.0)
         self.base_scale = float(astronaut.scale_x)
-        self.min_zoom_multiplier = 0.22
-        self.max_zoom_multiplier = 7.92
-        self.target_zoom_multiplier = 0.8
+        self.min_zoom_multiplier = 0.6 if is_hubble else 0.22
+        self.max_zoom_multiplier = 15.84 if is_hubble else 7.92
+        self.target_zoom_multiplier = 1.55 if is_hubble else 0.8
         self.single_rotation_y_gain = 520.0
         self.single_rotation_x_gain = 410.0
         self.single_rotation_z_gain = 240.0
@@ -344,9 +358,20 @@ class AstronautGestureController:
         self.two_hand_zoom_only_ratio = 0.58
         self.two_hand_pair_rotate_gain = 1.7
         self.two_hand_roll_rotate_gain = 2.2
+        self.position_limit_x = 5.8 if is_hubble else 4.2
+        self.position_limit_y = 3.4 if is_hubble else 3.0
         self.target_rotation_x = astronaut.rotation_x
         self.target_rotation_y = astronaut.rotation_y
         self.target_rotation_z = astronaut.rotation_z
+        self.home_position = Vec3(
+            float(astronaut.position.x),
+            float(astronaut.position.y),
+            float(astronaut.position.z),
+        )
+        self.home_rotation_x = float(astronaut.rotation_x)
+        self.home_rotation_y = float(astronaut.rotation_y)
+        self.home_rotation_z = float(astronaut.rotation_z)
+        self.home_zoom_multiplier = self.target_zoom_multiplier
 
         self.prev_single_index_tip: Optional[tuple[float, float]] = None
         self.prev_single_roll_angle: Optional[float] = None
@@ -383,6 +408,35 @@ class AstronautGestureController:
     @staticmethod
     def _signed_angle_delta(current: float, anchor: float) -> float:
         return float(np.arctan2(np.sin(current - anchor), np.cos(current - anchor)))
+
+    def _clamp_position(self, value: Vec3) -> Vec3:
+        return Vec3(
+            max(-self.position_limit_x, min(self.position_limit_x, float(value.x))),
+            max(-self.position_limit_y, min(self.position_limit_y, float(value.y))),
+            0.0,
+        )
+
+    def reset_view(self, hard: bool = False) -> None:
+        self.target_position = Vec3(
+            float(self.home_position.x),
+            float(self.home_position.y),
+            float(self.home_position.z),
+        )
+        self.target_rotation_x = self.home_rotation_x
+        self.target_rotation_y = self.home_rotation_y
+        self.target_rotation_z = self.home_rotation_z
+        self.target_zoom_multiplier = self.home_zoom_multiplier
+        self.on_hand_lost()
+        if hard:
+            self.astronaut.position = Vec3(
+                float(self.home_position.x),
+                float(self.home_position.y),
+                float(self.home_position.z),
+            )
+            self.astronaut.rotation_x = self.home_rotation_x
+            self.astronaut.rotation_y = self.home_rotation_y
+            self.astronaut.rotation_z = self.home_rotation_z
+            self.astronaut.scale = self.base_scale * self.home_zoom_multiplier
 
     def apply(self, hands: list[HandMetrics]) -> None:
         if not hands:
@@ -447,10 +501,13 @@ class AstronautGestureController:
             ):
                 dx = control_center[0] - self.two_hand_anchor_center[0]
                 dy = control_center[1] - self.two_hand_anchor_center[1]
-                self.target_position = self.two_hand_anchor_position + Vec3(
-                    dx * self.two_hand_move_x_gain,
-                    -dy * self.two_hand_move_y_gain,
-                    0.0,
+                self.target_position = self._clamp_position(
+                    self.two_hand_anchor_position
+                    + Vec3(
+                        dx * self.two_hand_move_x_gain,
+                        -dy * self.two_hand_move_y_gain,
+                        0.0,
+                    )
                 )
 
                 # Requested behavior: hands closer -> zoom in, farther -> zoom out.
@@ -565,6 +622,11 @@ class AstronautGestureController:
         blend_transform = min(1.0, time.dt * 9.0)
         blend_scale = min(1.0, time.dt * 10.0)
 
+        self.target_position = self._clamp_position(self.target_position)
+        self.target_zoom_multiplier = max(
+            self.min_zoom_multiplier,
+            min(self.max_zoom_multiplier, self.target_zoom_multiplier),
+        )
         self.astronaut.position = lerp(self.astronaut.position, self.target_position, blend_transform)
         self.astronaut.rotation_x = lerp(self.astronaut.rotation_x, self.target_rotation_x, blend_transform)
         self.astronaut.rotation_y = lerp(self.astronaut.rotation_y, self.target_rotation_y, blend_transform)
@@ -578,14 +640,37 @@ class AstronautGestureController:
 class SceneRuntime(Entity):
     def __init__(self) -> None:
         super().__init__()
+        try:
+            self.setShaderOff(100)
+        except Exception:
+            pass
 
         window.title = "Astro Gesture 3D"
         window.color = color.black
         window.fps_counter.enabled = False
+        try:
+            # Some macOS/OpenGL environments fail generated GLSL shaders.
+            # Force fixed pipeline for stable visibility.
+            # Do not apply this to UI/render2d; UI uses transparent quads.
+            for node_name in ("render", "scene"):
+                node = getattr(builtins, node_name, None)
+                if node is not None and hasattr(node, "setShaderOff"):
+                    node.setShaderOff(100)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(render, "clearFog"):
+                render.clearFog()
+            if hasattr(scene, "clearFog"):
+                scene.clearFog()
+        except Exception:
+            pass
 
         self._build_environment()
         self.astronaut = self._load_astronaut()
         self.controller = AstronautGestureController(self.astronaut)
+        self.controller.reset_view(hard=True)
         self.webcam_panel = WebcamPanel()
 
         top_left = window.top_left + Vec2(0.03, -0.04)
@@ -609,6 +694,8 @@ class SceneRuntime(Entity):
 
         self.hand_tracker: Optional[HandTracker] = None
         self.tracker_error: Optional[str] = None
+        self.hand_lost_time = 0.0
+        self._startup_shader_guard_frames = 12
         try:
             self.hand_tracker = HandTracker()
             atexit.register(self.hand_tracker.close)
@@ -617,15 +704,60 @@ class SceneRuntime(Entity):
             self.hand_status_text.text = self.tracker_error
             self.hand_status_text.enabled = True
 
+        self._force_shader_off_everything()
+
+    @staticmethod
+    def _force_shader_off_tree(root: object) -> None:
+        try:
+            if hasattr(root, "setShaderOff"):
+                root.setShaderOff(100)
+        except Exception:
+            pass
+
+        children = getattr(root, "children", None)
+        if children:
+            for child in list(children):
+                SceneRuntime._force_shader_off_tree(child)
+
+        model = getattr(root, "model", None)
+        if model is not None:
+            try:
+                if hasattr(model, "setShaderOff"):
+                    model.setShaderOff(100)
+                if hasattr(model, "findAllMatches"):
+                    for node in model.findAllMatches("**"):
+                        if hasattr(node, "setShaderOff"):
+                            node.setShaderOff(100)
+            except Exception:
+                pass
+
+    def _force_shader_off_everything(self) -> None:
+        for node_name in ("render", "scene"):
+            node = getattr(builtins, node_name, None)
+            if node is not None:
+                self._force_shader_off_tree(node)
+
     def _build_environment(self) -> None:
+        try:
+            if hasattr(render, "clearFog"):
+                render.clearFog()
+            if hasattr(scene, "clearFog"):
+                scene.clearFog()
+        except Exception:
+            pass
+
         camera.position = (0, 0, -10.5)
         camera.fov = 58
-
-        AmbientLight(color=color.rgba(150, 170, 190, 110))
-        key_light = DirectionalLight(shadows=False)
-        key_light.look_at(Vec3(1, -1, -1))
+        camera.clip_plane_near = 0.01
+        camera.clip_plane_far = 500.0
 
         starfield = Entity(parent=scene, name="starfield")
+        try:
+            starfield.setShaderOff(100)
+            starfield.setLightOff(1)
+            starfield.setMaterialOff(1)
+        except Exception:
+            pass
         for _ in range(260):
             direction = Vec3(
                 random.uniform(-1.0, 1.0),
@@ -633,27 +765,45 @@ class SceneRuntime(Entity):
                 random.uniform(-1.0, 1.0),
             ).normalized()
             radius = random.uniform(30.0, 52.0)
-            Entity(
+            star = Entity(
                 parent=starfield,
                 model="sphere",
                 scale=random.uniform(0.04, 0.1),
                 position=direction * radius,
                 color=color.rgba(245, 248, 255, random.randint(170, 255)),
-                unlit=True,
             )
+            try:
+                star.setLightOff(1)
+                star.setMaterialOff(1)
+                star.setShaderOff(100)
+            except Exception:
+                pass
 
     def _load_astronaut(self) -> Entity:
         asset_root = Path(__file__).resolve().parent
-        self._ensure_decoded_glb(asset_root)
+        self._ensure_decoded_glb(asset_root, source_name="Astronaut.glb", decoded_name="Astronaut_plain.glb")
+        self._ensure_decoded_glb(
+            asset_root,
+            source_name="Hubble Space Telescope (B).glb",
+            decoded_name="Hubble Space Telescope (B)_plain.glb",
+        )
         self._ensure_compatible_glb(asset_root)
 
-        candidates = [
-            "Astronaut_plain.obj",
-            "Astronaut_compat.glb",
-            "Astronaut_plain.glb",
-            "Astronaut.glb",
-            "Astronaut_converted.obj",
-        ]
+        hubble_present = (asset_root / "Hubble Space Telescope (B).glb").exists()
+        if hubble_present:
+            # If user places Hubble model, do not silently fall back to astronaut.
+            candidates = [
+                "Hubble Space Telescope (B)_plain.glb",
+                "Hubble Space Telescope (B).glb",
+            ]
+        else:
+            candidates = [
+                "Astronaut_plain.obj",
+                "Astronaut_compat.glb",
+                "Astronaut_plain.glb",
+                "Astronaut.glb",
+                "Astronaut_converted.obj",
+            ]
 
         model_data = None
         loaded_name = None
@@ -667,7 +817,14 @@ class SceneRuntime(Entity):
                     if hasattr(model_data, "isEmpty") and model_data.isEmpty():
                         model_data = None
                 else:
-                    model_data = load_model(name)
+                    try:
+                        model_data = load_model(name)
+                    except Exception:
+                        model_data = None
+                    if model_data is None or (hasattr(model_data, "isEmpty") and model_data.isEmpty()):
+                        model_data = builtins.loader.loadModel(str(path))
+                    if hasattr(model_data, "isEmpty") and model_data.isEmpty():
+                        model_data = None
             except Exception as exc:
                 print(f"warning: failed to load {name}: {exc}")
                 model_data = None
@@ -675,9 +832,16 @@ class SceneRuntime(Entity):
                 loaded_name = name
                 break
 
+        if model_data is None and hubble_present:
+            raise FileNotFoundError(
+                "Hubble Space Telescope model exists but could not be loaded. "
+                "Try installing Node.js (for npx) so a decoded copy can be generated, "
+                "or provide Hubble Space Telescope (B)_plain.glb."
+            )
+
         if model_data is None:
             raise FileNotFoundError(
-                "No compatible astronaut model found. Expected Astronaut_plain.obj, Astronaut_compat.glb, Astronaut_plain.glb, Astronaut.glb, or Astronaut_converted.obj."
+                "No compatible model found. Expected Astronaut_plain.obj, Astronaut_compat.glb, Astronaut_plain.glb, Astronaut.glb, or Astronaut_converted.obj."
             )
 
         astronaut = Entity(
@@ -686,15 +850,27 @@ class SceneRuntime(Entity):
             position=(0, -0.2, 0),
             rotation=(0, 180, 0),
         )
-        self._normalize_model_transform(astronaut)
-        self._apply_compat_shader(astronaut)
-        print(f"info: astronaut model loaded: {loaded_name}")
+        try:
+            astronaut.setShaderOff(100)
+            astronaut.clearFog()
+        except Exception:
+            pass
+        is_hubble = loaded_name is not None and loaded_name.startswith("Hubble Space Telescope (B)")
+        self._normalize_model_transform(astronaut, target_max_extent=5.2 if is_hubble else 2.2)
+        astronaut.is_hubble_model = is_hubble
+        if is_hubble:
+            astronaut.position = (0, 0, 0)
+            astronaut.rotation = (0, 132, 0)
+            self._apply_hubble_visuals(astronaut)
+        else:
+            self._apply_compat_shader(astronaut)
+        print(f"info: model loaded: {loaded_name}")
         return astronaut
 
     @staticmethod
-    def _ensure_decoded_glb(asset_root: Path) -> None:
-        src = asset_root / "Astronaut.glb"
-        decoded = asset_root / "Astronaut_plain.glb"
+    def _ensure_decoded_glb(asset_root: Path, source_name: str, decoded_name: str) -> None:
+        src = asset_root / source_name
+        decoded = asset_root / decoded_name
         if not src.exists() or decoded.exists():
             return
 
@@ -709,9 +885,9 @@ class SceneRuntime(Entity):
                 capture_output=True,
                 text=True,
             )
-            print("info: created Astronaut_plain.glb from Astronaut.glb")
+            print(f"info: created {decoded_name} from {source_name}")
         except Exception as exc:
-            print(f"warning: failed to create Astronaut_plain.glb: {exc}")
+            print(f"warning: failed to create {decoded_name}: {exc}")
 
     @staticmethod
     def _ensure_compatible_glb(asset_root: Path) -> None:
@@ -841,7 +1017,173 @@ class SceneRuntime(Entity):
         except Exception as exc:
             print(f"warning: failed to apply compatibility shader: {exc}")
 
+    @staticmethod
+    def _apply_hubble_visuals(entity: Entity) -> None:
+        model = entity.model
+        if model is None:
+            return
+        try:
+            if hasattr(entity, "setShaderOff"):
+                entity.setShaderOff(100)
+            if hasattr(entity, "setLightOff"):
+                entity.setLightOff(1)
+            if hasattr(entity, "setMaterialOff"):
+                entity.setMaterialOff(1)
+            if hasattr(entity, "setTextureOff"):
+                entity.setTextureOff(1)
+            if hasattr(entity, "setTransparency"):
+                entity.setTransparency(TransparencyAttrib.M_alpha)
+            if hasattr(entity, "setAlphaScale"):
+                entity.setAlphaScale(HUBBLE_VISUAL_ALPHA)
+            if hasattr(entity, "clearFog"):
+                entity.clearFog()
+            # Avoid custom GLSL here; some macOS drivers in this setup reject generated shader versions.
+            # Use fixed pipeline state so geometry stays visible.
+            if hasattr(model, "clearShader"):
+                model.clearShader()
+            if hasattr(model, "clearFog"):
+                model.clearFog()
+            if hasattr(model, "setShaderOff"):
+                model.setShaderOff(1)
+            if hasattr(model, "setLightOff"):
+                model.setLightOff(1)
+            if hasattr(model, "setMaterialOff"):
+                model.setMaterialOff(1)
+            if hasattr(model, "setTextureOff"):
+                model.setTextureOff(1)
+            if hasattr(model, "setColor"):
+                model.setColor(
+                    HUBBLE_VISUAL_TINT[0],
+                    HUBBLE_VISUAL_TINT[1],
+                    HUBBLE_VISUAL_TINT[2],
+                    HUBBLE_VISUAL_ALPHA,
+                )
+            if hasattr(model, "setColorScale"):
+                model.setColorScale(1.0, 1.0, 1.0, HUBBLE_VISUAL_ALPHA)
+            if hasattr(model, "setTransparency"):
+                model.setTransparency(TransparencyAttrib.M_alpha)
+            if hasattr(model, "setAlphaScale"):
+                model.setAlphaScale(HUBBLE_VISUAL_ALPHA)
+            if hasattr(model, "setTwoSided"):
+                model.setTwoSided(True)
+            if hasattr(model, "setAttrib"):
+                model.setAttrib(CullFaceAttrib.make(CullFaceAttrib.MCullNone))
+            for node in model.findAllMatches("**"):
+                if hasattr(node, "clearShader"):
+                    node.clearShader()
+                if hasattr(node, "setShaderOff"):
+                    node.setShaderOff(1)
+                if hasattr(node, "setLightOff"):
+                    node.setLightOff(1)
+                if hasattr(node, "setMaterialOff"):
+                    node.setMaterialOff(1)
+                if hasattr(node, "setTextureOff"):
+                    node.setTextureOff(1)
+                if hasattr(node, "setColor"):
+                    node.setColor(
+                        HUBBLE_VISUAL_TINT[0],
+                        HUBBLE_VISUAL_TINT[1],
+                        HUBBLE_VISUAL_TINT[2],
+                        HUBBLE_VISUAL_ALPHA,
+                    )
+                if hasattr(node, "setColorScale"):
+                    node.setColorScale(1.0, 1.0, 1.0, HUBBLE_VISUAL_ALPHA)
+                if hasattr(node, "setTransparency"):
+                    node.setTransparency(TransparencyAttrib.M_alpha)
+                if hasattr(node, "setAlphaScale"):
+                    node.setAlphaScale(HUBBLE_VISUAL_ALPHA)
+                if hasattr(node, "clearFog"):
+                    node.clearFog()
+                if hasattr(node, "setTwoSided"):
+                    node.setTwoSided(True)
+                if hasattr(node, "setAttrib"):
+                    node.setAttrib(CullFaceAttrib.make(CullFaceAttrib.MCullNone))
+            SceneRuntime._attach_hubble_glow(entity)
+        except Exception as exc:
+            print(f"warning: failed to apply hubble visuals: {exc}")
+
+    @staticmethod
+    def _attach_hubble_glow(entity: Entity) -> None:
+        model = entity.model
+        if model is None or not hasattr(model, "copyTo"):
+            return
+
+        prev_glow = getattr(entity, "_hubble_glow_shell", None)
+        if prev_glow is not None and hasattr(prev_glow, "removeNode"):
+            try:
+                prev_glow.removeNode()
+            except Exception:
+                pass
+
+        glow = model.copyTo(entity)
+        entity._hubble_glow_shell = glow
+        if hasattr(glow, "setScale"):
+            glow.setScale(HUBBLE_GLOW_SCALE)
+
+        try:
+            glow.clearFog()
+        except Exception:
+            pass
+
+        targets = [glow]
+        try:
+            targets.extend(list(glow.findAllMatches("**")))
+        except Exception:
+            pass
+
+        for node in targets:
+            try:
+                if hasattr(node, "clearShader"):
+                    node.clearShader()
+                if hasattr(node, "setShaderOff"):
+                    node.setShaderOff(1)
+                if hasattr(node, "setLightOff"):
+                    node.setLightOff(1)
+                if hasattr(node, "setMaterialOff"):
+                    node.setMaterialOff(1)
+                if hasattr(node, "setTextureOff"):
+                    node.setTextureOff(1)
+                if hasattr(node, "setTransparency"):
+                    blend_mode = getattr(TransparencyAttrib, "M_add", TransparencyAttrib.M_alpha)
+                    node.setTransparency(blend_mode)
+                if hasattr(node, "setColor"):
+                    node.setColor(
+                        HUBBLE_GLOW_COLOR[0],
+                        HUBBLE_GLOW_COLOR[1],
+                        HUBBLE_GLOW_COLOR[2],
+                        HUBBLE_GLOW_ALPHA,
+                    )
+                if hasattr(node, "setColorScale"):
+                    node.setColorScale(1.25, 1.35, 1.6, HUBBLE_GLOW_ALPHA)
+                if hasattr(node, "setAlphaScale"):
+                    node.setAlphaScale(HUBBLE_GLOW_ALPHA)
+                if hasattr(node, "setTwoSided"):
+                    node.setTwoSided(True)
+                if hasattr(node, "setAttrib"):
+                    node.setAttrib(CullFaceAttrib.make(CullFaceAttrib.MCullNone))
+                if hasattr(node, "setDepthWrite"):
+                    node.setDepthWrite(False)
+                if hasattr(node, "setDepthTest"):
+                    node.setDepthTest(False)
+                if hasattr(node, "setBin"):
+                    node.setBin("transparent", 48)
+                if hasattr(node, "clearFog"):
+                    node.clearFog()
+            except Exception:
+                pass
+
     def update(self) -> None:
+        if self._startup_shader_guard_frames > 0:
+            self._force_shader_off_everything()
+            try:
+                if hasattr(render, "clearFog"):
+                    render.clearFog()
+                if hasattr(scene, "clearFog"):
+                    scene.clearFog()
+            except Exception:
+                pass
+            self._startup_shader_guard_frames -= 1
+
         if self.hand_tracker is None:
             return
 
@@ -851,15 +1193,22 @@ class SceneRuntime(Entity):
         if not hands:
             self.controller.on_hand_lost()
             self.hand_status_text.enabled = True
+            self.hand_lost_time += max(time.dt, 0.0)
+            if self.hand_lost_time > 1.25:
+                self.controller.reset_view(hard=False)
         else:
             self.controller.apply(hands)
             self.hand_status_text.enabled = False
+            self.hand_lost_time = 0.0
 
         self.controller.smooth_update()
         self.fps_text.text = f"FPS: {fps:5.1f}"
         self.gesture_text.text = f"Gesture: {self.controller.gesture_state}"
 
     def input(self, key: str) -> None:
+        if key == "r":
+            self.controller.reset_view(hard=True)
+            return
         if key == "escape":
             if self.hand_tracker is not None:
                 self.hand_tracker.close()

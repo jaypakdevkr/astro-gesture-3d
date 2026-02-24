@@ -6,7 +6,9 @@
 
 - 실시간 손가락 추적(21개 랜드마크, 최대 2손)
 - 3D 우주인 모델 렌더링 + 우주 배경(스타필드)
-- 텍스처 유지 `Astronaut_plain.obj` 우선 로딩, 없으면 `Astronaut_compat.glb` / `Astronaut_plain.glb` / `Astronaut.glb` / `Astronaut_converted.obj` 순으로 폴백
+- 모델 로딩 정책:
+  - `Hubble Space Telescope (B).glb`가 있으면 허블 모델만 로딩(실패 시 에러, 우주인 폴백 없음)
+  - 허블 파일이 없을 때만 `Astronaut_plain.obj` / `Astronaut_compat.glb` / `Astronaut_plain.glb` / `Astronaut.glb` / `Astronaut_converted.obj` 순으로 폴백
 - MediaPipe 구버전(`mp.solutions`)과 신버전(`tasks`) 모두 지원
 - 제스처 매핑
   - `1손`: 회전 전용 (검지 이동)
@@ -55,13 +57,23 @@ python3 app.py
 ## Controls
 
 - `ESC`: 종료
+- `R`: 모델 위치/회전/줌 즉시 초기화(화면 중앙 복귀)
 
 ## Notes
 
 - macOS에서는 카메라 접근 권한 허용이 필요합니다.
-- `Astronaut.glb` 파일은 프로젝트 루트에 있어야 합니다.
+- `Hubble Space Telescope (B).glb`를 프로젝트 루트에 두면 허블 망원경 모델이 우선 로딩됩니다.
+- 허블 모델이 Draco 압축본이면 실행 시 `Hubble Space Telescope (B)_plain.glb`가 자동 생성되어 사용됩니다.
+- `Astronaut.glb` 파일은 프로젝트 루트에 있으면 폴백 모델로 사용됩니다.
 - `Astronaut_plain.glb`는 Draco 압축 해제된 호환본 모델입니다.
 - `Astronaut_plain.obj`는 Panda3D에서 텍스처 인식 안정성이 높은 폴백 모델입니다.
 - `Astronaut_compat.glb`는 WebP 텍스처 확장을 PNG 텍스처로 치환한 렌더링 호환본입니다.
 - `Astronaut_converted.obj`, `material.mtl`, `astnt1_1.png`, `astnt1_2.png`는 GLB 폴백 렌더링용입니다.
 - `mediapipe`가 `tasks` API만 제공하는 환경(Python 3.13 등)에서는 첫 실행 시 `models/hand_landmarker.task`를 자동 다운로드합니다.
+
+## Troubleshooting
+
+- 화면이 검정색으로만 보일 때:
+  - 먼저 `R` 키로 모델을 중앙에 리셋해 보세요.
+  - 손을 모두 내리고 1~2초 기다리면 모델이 자동으로 홈 위치로 복귀합니다.
+  - 콘솔에 `OpenCV: camera failed to properly initialize!`가 나오면 macOS 카메라 권한을 허용한 뒤 앱을 재실행하세요.
