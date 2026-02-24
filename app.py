@@ -340,6 +340,8 @@ class AstronautGestureController:
         self.two_hand_move_y_gain = 5.4
         self.two_hand_zoom_power = 1.0
         self.two_hand_zoom_in_gain = 1.6
+        self.two_hand_rotate_min_distance = 0.1
+        self.two_hand_zoom_only_ratio = 0.58
         self.two_hand_pair_rotate_gain = 1.7
         self.two_hand_roll_rotate_gain = 2.2
         self.target_rotation_x = astronaut.rotation_x
@@ -460,19 +462,36 @@ class AstronautGestureController:
                     self.min_zoom_multiplier,
                     min(self.max_zoom_multiplier, zoom_target),
                 )
-
-                pair_delta = self._signed_angle_delta(pair_angle, self.two_hand_anchor_angle)
-                left_roll_delta = self._signed_angle_delta(left_roll, self.two_hand_anchor_left_roll)
-                right_roll_delta = self._signed_angle_delta(right_roll, self.two_hand_anchor_right_roll)
-                roll_delta = (left_roll_delta + right_roll_delta) * 0.5
-
-                self.target_rotation_y = self.two_hand_anchor_rotation_y - (
-                    np.degrees(roll_delta) * self.two_hand_roll_rotate_gain
+                # When hands are very close, pair-angle becomes noisy.
+                # Lock to zoom-only mode to prevent sudden spins.
+                rotate_lock_distance = max(
+                    self.two_hand_rotate_min_distance,
+                    self.two_hand_anchor_distance * self.two_hand_zoom_only_ratio,
                 )
-                self.target_rotation_z = self.two_hand_anchor_rotation_z - (
-                    np.degrees(pair_delta) * self.two_hand_pair_rotate_gain
-                )
-                rot_delta = max(abs(pair_delta), abs(roll_delta))
+                zoom_only_mode = hand_distance <= rotate_lock_distance
+
+                if zoom_only_mode:
+                    self.target_rotation_y = float(self.astronaut.rotation_y)
+                    self.target_rotation_z = float(self.astronaut.rotation_z)
+                    self.two_hand_anchor_angle = pair_angle
+                    self.two_hand_anchor_left_roll = left_roll
+                    self.two_hand_anchor_right_roll = right_roll
+                    self.two_hand_anchor_rotation_y = float(self.target_rotation_y)
+                    self.two_hand_anchor_rotation_z = float(self.target_rotation_z)
+                    rot_delta = 0.0
+                else:
+                    pair_delta = self._signed_angle_delta(pair_angle, self.two_hand_anchor_angle)
+                    left_roll_delta = self._signed_angle_delta(left_roll, self.two_hand_anchor_left_roll)
+                    right_roll_delta = self._signed_angle_delta(right_roll, self.two_hand_anchor_right_roll)
+                    roll_delta = (left_roll_delta + right_roll_delta) * 0.5
+
+                    self.target_rotation_y = self.two_hand_anchor_rotation_y - (
+                        np.degrees(roll_delta) * self.two_hand_roll_rotate_gain
+                    )
+                    self.target_rotation_z = self.two_hand_anchor_rotation_z - (
+                        np.degrees(pair_delta) * self.two_hand_pair_rotate_gain
+                    )
+                    rot_delta = max(abs(pair_delta), abs(roll_delta))
                 move_delta = float(np.hypot(dx, dy))
                 zoom_delta = abs(hand_distance - self.two_hand_anchor_distance)
 
