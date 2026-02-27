@@ -81,6 +81,7 @@ HUBBLE_VISUAL_TINT = (0.74, 0.86, 1.0)
 HUBBLE_GLOW_COLOR = (0.32, 0.64, 1.0)
 HUBBLE_GLOW_ALPHA = 0.34
 HUBBLE_GLOW_SCALE = 1.06
+SHOW_WEBCAM_PANEL = False
 
 
 def get_legacy_texture_shader() -> Shader:
@@ -671,7 +672,7 @@ class SceneRuntime(Entity):
         self.astronaut = self._load_astronaut()
         self.controller = AstronautGestureController(self.astronaut)
         self.controller.reset_view(hard=True)
-        self.webcam_panel = WebcamPanel()
+        self.webcam_panel = WebcamPanel() if SHOW_WEBCAM_PANEL else None
 
         top_left = window.top_left + Vec2(0.03, -0.04)
         self.fps_text = Text(parent=camera.ui, text="FPS: --", position=top_left, origin=(-0.5, 0.5), scale=1.1)
@@ -1188,7 +1189,8 @@ class SceneRuntime(Entity):
             return
 
         hands, frame, fps = self.hand_tracker.read()
-        self.webcam_panel.update_frame(frame)
+        if self.webcam_panel is not None:
+            self.webcam_panel.update_frame(frame)
 
         if not hands:
             self.controller.on_hand_lost()
