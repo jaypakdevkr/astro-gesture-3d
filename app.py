@@ -167,7 +167,15 @@ class HandTracker:
             with urllib.request.urlopen(HAND_LANDMARKER_TASK_URL, timeout=30) as response:
                 model_path.write_bytes(response.read())
         except Exception as exc:
-            raise RuntimeError(f"Unable to download MediaPipe model: {HAND_LANDMARKER_TASK_URL}") from exc
+            manual_command = (
+                "mkdir -p models && curl -L --fail -o models/hand_landmarker.task "
+                f"'{HAND_LANDMARKER_TASK_URL}'"
+            )
+            raise RuntimeError(
+                "MediaPipe Hand Landmarker model is missing and automatic download failed.\n"
+                "Run this from the project directory, then start the app again:\n"
+                f"  {manual_command}"
+            ) from exc
 
         return model_path
 

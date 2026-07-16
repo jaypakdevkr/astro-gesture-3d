@@ -77,3 +77,10 @@ python3 app.py
   - 먼저 `R` 키로 모델을 중앙에 리셋해 보세요.
   - 손을 모두 내리고 1~2초 기다리면 모델이 자동으로 홈 위치로 복귀합니다.
   - 콘솔에 `OpenCV: camera failed to properly initialize!`가 나오면 macOS 카메라 권한을 허용한 뒤 앱을 재실행하세요.
+- `MediaPipe Hand Landmarker model is missing` 오류가 뜰 때:
+
+```bash
+mkdir -p models
+curl -L --fail -o models/hand_landmarker.task \
+  https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
+```
